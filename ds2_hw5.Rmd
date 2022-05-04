@@ -1,0 +1,208 @@
+---
+title: "ds2_hw4"
+author: "Jinghan Liu"
+date: "4/13/2022"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(caret) 
+library(tidyverse)
+library(mlbench)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(party)
+library(partykit)
+library(doParallel)
+library(ISLR)
+library(ranger)
+library(gbm)
+knitr::opts_chunk$set(
+  fig.width = 12,
+  fig.asp = .6,
+  out.width = "90%",
+  message = FALSE,
+  warning = FALSE)
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis"
+)
+scale_colour_discrete = scale_colour_viridis_d
+scale_fill_discrete = scale_fill_viridis_d
+```
+
+## Question 1
+### a) Build a regression tree on the training data to predict the response. Create a plot of the tree.
+```{r}
+#set up
+college_data = read.csv("data/College.csv") %>% 
+  janitor::clean_names() %>% 
+  na.omit()%>% 
+  select(-1)
+set.seed(2022)
+trainRows = createDataPartition(y = college_data$outstate, 
+                                p = 0.8, 
+                                list = FALSE)
+College_train <- college_data[trainRows, ]
+College_test <- college_data[-trainRows, ]
+summary(college_data)
+
+
+# regression tree using cart
+ctrl <- trainControl(method = "cv")
+set.seed(2022)
+reg_tree <- train(outstate ~ . ,
+                College_train,
+                method = "rpart",
+                tuneGrid = data.frame(cp = exp(seq(-6,-4, length = 50))),
+                trControl = ctrl)
+reg_tree$bestTune
+ggplot(reg_tree, highlight = TRUE)+
+  labs(title = "RMSE vs Complexity Parameter for Regression Tree")
+rpart.plot(reg_tree$finalModel)
+
+
+```
+
+
+
+### b) Perform random forest on the training data. Report the variable importance and the test error.
+```{r}
+set.seed(2022)
+
+# Grid of tuning parameters
+rf_grid = expand.grid(mtry = 1:16,
+                      splitrule = "variance",
+                      min.node.size = 1:6)
+
+# Find best-fitting model after model fitting to optimize computational efficiency
+rf_college = train(outstate ~ .,
+                       data = College_train,
+                       method = "ranger",
+                       tuneGrid = rf_grid,
+                       trControl = ctrl)
+                       
+rf_college$bestTune
+ggplot(rf_college, highlight = TRUE)
+pred_rf <- predict(rf_college, newdata = College_test)
+test_error <- RMSE(pred_rf, College_test$outstate)
+test_error
+
+#variable importance
+rf_per <- ranger(outstate ~ . ,
+                 College_train,
+                 mtry = rf_college$bestTune[[1]],
+                 splitrule = "variance",
+                 min.node.size = rf_college$bestTune[[3]],
+                 importance = "permutation",
+                 scale.permutation.importance = TRUE) 
+
+barplot(sort(ranger::importance(rf_per), decreasing = FALSE), 
+        las = 2, horiz = TRUE, cex.names = 0.7,
+        col = colorRampPalette(colors = c("cyan","blue"))(19))
+```
+The variable importances top 3 are expend, room_boards, apps and the test error is 1960.044.
+
+
+### c) Perform boosting on the training data. Report the variable importance and the test error.
+```{r}
+set.seed(2022)
+gbm_grid <- expand.grid(n.trees = c(2000,3000,4000,5000),
+                        interaction.depth = 1:5,
+                        shrinkage = c(0.001,0.003,0.005),
+                        n.minobsinnode = c(1,10))
+
+gbm_fit <- train(outstate ~ . ,
+                 College_train, 
+                 method = "gbm",
+                 tuneGrid = gbm_grid,
+                 trControl = ctrl,
+                 verbose = FALSE)
+ggplot(gbm_fit, highlight = TRUE)
+
+# variable importance
+summary(gbm_fit$finalModel, las = 2, cBars =19, cex.names = 0.6)
+
+#report test error
+boost_test_rmse = RMSE(predict(gbm_fit, newdata = College_test), College_test$outstate)
+boost_test_rmse
+```
+
+
+
+## Question 2
+### a) Build a classification tree using the training data, with Purchase as the response and the other variables as predictors. Use cross-validation to determine the tree size and create a plot of the final tree. Which tree size corresponds to the lowest cross-validation error? Is this the same as the tree size obtained using the 1 SE rule?
+
+
+```{r}
+#set up
+data(OJ)
+OJ <- na.omit(OJ)%>%
+  janitor::clean_names()
+
+set.seed(1234)
+trRows <- createDataPartition(OJ$purchase,
+                               p = 699/1070,
+                              list = F)
+oj_train = OJ[trRows,]
+oj_test = OJ[-trRows,]
+
+
+# build classification tree
+class_tree1 = rpart(formula = purchase ~ . ,
+                    data = oj_train,
+                    control = rpart.control(cp = 0))
+OJ_cpTable <- printcp(class_tree1)
+plotcp(class_tree1)
+
+# minimum cross-validation error; 
+minErr <- which.min(OJ_cpTable[,4])
+class_tree2 <- prune(class_tree1, cp = OJ_cpTable[minErr,1])
+rpart.plot(class_tree2)
+
+# using 1SE rule
+class_tree3 <- prune(class_tree1,cp = OJ_cpTable[OJ_cpTable[,4]<OJ_cpTable[minErr,4]+OJ_cpTable[minErr,5],1][1])
+rpart.plot(class_tree3)
+```
+
+By using minimizes cross-validation error the tree has 9 splits and leading to 10 terminal nodes which means size 10. By using 1SE rule, the tree has 7 splits and leading to 8 terminal nodes which means size 8. The tree by using 1se rule is smaller than the minimizes cross-validation error also easier to interpret the result.
+
+### b) Perform boosting on the training data and report the variable importance. What is the test error rate?
+
+```{r}
+set.seed(1234)
+bst_oj_grid <- expand.grid(n.trees = c(2000,3000,4000,5000),
+                        interaction.depth = 1:6,
+                        shrinkage = c(0.005,0.001,0.002),
+                        n.minobsinnode = 1)
+
+ctrl1 = trainControl(method = "repeatedcv", number = 10, repeats = 5,
+                       summaryFunction = twoClassSummary,
+                      classProbs = TRUE)
+
+bst_oj_fit <- train(purchase ~ . ,
+                 oj_train, 
+                 method = "gbm",
+                 distribution = "adaboost",
+                 metric ="ROC",
+                 tuneGrid = bst_oj_grid,
+                 trControl = ctrl1,
+                 verbose = FALSE)
+
+#ggplot(bst_oj_fit, highlight = TRUE)
+
+# variable importance
+summary(bst_oj_fit$finalModel, las = 2, cBars =19, cex.names = 0.6)
+
+#report test error error
+bst_pred = predict(bst_oj_fit, newdata = oj_test, type = "prob")[,1]
+bst_roc = pROC::roc(oj_test$purchase, bst_pred)
+plot(bst_roc, legacy.axes = TRUE, print.auc = TRUE, col = 1)
+bst_pred_class = predict(bst_oj_fit, newdata = oj_test)
+
+confusionMatrix(bst_pred_class,
+                oj_test$purchase)
+```
+
+
